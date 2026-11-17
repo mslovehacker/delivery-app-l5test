@@ -1,0 +1,31 @@
+name: ci
+on:
+  push:
+    branches: [ main ]
+    paths-ignore: [ 'deploy/**' ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: NCR 로그인
+        run: echo "${{ secrets.NCR_PASSWORD }}" | docker login "${{ secrets.NCR_HOST }}" -u "${{ secrets.NCR_USERNAME }}" --password-stdin
+
+      - name: 이미지 빌드와 push
+        run: |
+          TAG=${GITHUB_SHA::7}
+          docker build -t "${{ secrets.NCR_IMAGE }}:${TAG}" ./app
+          docker push "${{ secrets.NCR_IMAGE }}:${TAG}"
+
+      - name: dev 매니페스트 태그 갱신
+        run: |
+          TAG=${GITHUB_SHA::7}
+          sed -i "s|^  tag:.*|  tag: ${TAG}|" deploy/values-dev.yaml
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@example.com"
+          git commit -am "chore(dev): update image tag to ${TAG}"
+          git push

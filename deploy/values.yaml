@@ -1,0 +1,18 @@
+replicaCount: 2
+
+image:
+  repository: 77d1f138-kr1-registry.container.nhncloud.com/delivery/delivery-app
+  tag: v1
+
+# false 이면 Deployment, true 이면 Rollout 이 생성됩니다.
+progressiveDelivery: false
+
+canary:
+  steps:
+    - setWeight: 25
+    - pause: { duration: 30s }
+    - setWeight: 50
+    - pause: { duration: 30s }
+    - setWeight: 100
+  progressDeadlineSeconds: 60
+  progressDeadlineAbort: true

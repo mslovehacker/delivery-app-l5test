@@ -1,0 +1,5 @@
+# dev 클러스터 (nhn-nks-dev) - Application delivery-dev
+replicaCount: 2
+
+image:
+  tag: v1

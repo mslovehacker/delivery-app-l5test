@@ -1,0 +1,5 @@
+apiVersion: v2
+name: delivery-app
+description: NKS Advanced Course - Delivery and Operations
+type: application
+version: 0.1.0
