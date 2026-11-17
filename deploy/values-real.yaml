@@ -2,7 +2,7 @@
 replicaCount: 3
 
 image:
-  tag: v1
+  tag: 761143d
 
 # real 만 Argo Rollouts(Canary) 로 배포합니다. 과제 5 에서 true 로 바꿉니다.
 progressiveDelivery: false
