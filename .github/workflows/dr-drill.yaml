@@ -1,0 +1,103 @@
+name: dr-drill
+
+on:
+  workflow_dispatch:
+  # 정기 훈련을 원하면 주석을 풉니다 (매주 월요일 03:00 KST)
+  # schedule:
+  #   - cron: "0 18 * * 0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dr-drill
+  cancel-in-progress: false
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VELERO_VERSION: v1.14.1
+      SRC_NS: delivery
+      DRILL_NS: delivery-drill
+      DRILL_ID: drill-${{ github.run_id }}
+    steps:
+      - name: 도구와 접속 정보 준비
+        env:
+          KC_REAL: ${{ secrets.DR_DRILL_KUBECONFIG_REAL }}
+          KC_DR: ${{ secrets.DR_DRILL_KUBECONFIG_DR }}
+        run: |
+          curl -fsSL -o /tmp/velero.tgz \
+            "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/velero.tgz -C /tmp
+          sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
+          echo "${KC_REAL}" | base64 -d > "${RUNNER_TEMP}/real.yaml"
+          echo "${KC_DR}"   | base64 -d > "${RUNNER_TEMP}/dr.yaml"
+          chmod 600 "${RUNNER_TEMP}"/*.yaml
+          echo "KR=${RUNNER_TEMP}/real.yaml" >> "${GITHUB_ENV}"
+          echo "KD=${RUNNER_TEMP}/dr.yaml"   >> "${GITHUB_ENV}"
+          velero version --client-only
+
+      - name: "1) real 백업"
+        run: |
+          velero --kubeconfig "${KR}" backup create "${DRILL_ID}" \
+            --include-namespaces "${SRC_NS}" --ttl 24h0m0s --wait
+          PHASE="$(kubectl --kubeconfig "${KR}" -n velero get backup "${DRILL_ID}" -o jsonpath='{.status.phase}')"
+          echo "backup phase: ${PHASE}"
+          [ "${PHASE}" = "Completed" ]
+          echo "T_BACKUP=$(date +%s)" >> "${GITHUB_ENV}"
+
+      - name: "2) 평촌 동기화 대기"
+        run: |
+          for i in $(seq 1 30); do
+            kubectl --kubeconfig "${KD}" -n velero get backup "${DRILL_ID}" >/dev/null 2>&1 && exit 0
+            sleep 10
+          done
+          echo "평촌 Velero 가 백업을 읽지 못했습니다." && exit 1
+
+      - name: "3) 평촌 복원 (${{ env.DRILL_NS }})"
+        run: |
+          echo "T_START=$(date +%s)" >> "${GITHUB_ENV}"
+          velero --kubeconfig "${KD}" restore create "${DRILL_ID}" \
+            --from-backup "${DRILL_ID}" \
+            --namespace-mappings "${SRC_NS}:${DRILL_NS}" --wait
+          PHASE="$(kubectl --kubeconfig "${KD}" -n velero get restore "${DRILL_ID}" -o jsonpath='{.status.phase}')"
+          echo "restore phase: ${PHASE}"
+          [ "${PHASE}" = "Completed" ]
+
+      - name: "4) 서비스 검증"
+        run: |
+          kubectl --kubeconfig "${KD}" -n "${DRILL_NS}" rollout status deployment/delivery-app --timeout=300s
+          IMAGE="$(kubectl --kubeconfig "${KD}" -n "${DRILL_NS}" get deploy delivery-app -o jsonpath='{.spec.template.spec.containers[0].image}')"
+          for i in $(seq 1 30); do
+            LB="$(kubectl --kubeconfig "${KD}" -n "${DRILL_NS}" get svc delivery-app -o jsonpath='{.status.loadBalancer.ingress[0].ip}')"
+            [ -n "${LB}" ] && break; sleep 10
+          done
+          for i in $(seq 1 30); do
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${LB}/" || true)"
+            [ "${CODE}" = "200" ] && break; sleep 5
+          done
+          T_END="$(date +%s)"
+          RTO=$((T_END - T_START)); SYNC=$((T_START - T_BACKUP))
+          {
+            echo "## DR 훈련 결과 (${DRILL_ID})"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 복원 대상 | 평촌 \`${DRILL_NS}\` |"
+            echo "| 이미지 | \`${IMAGE}\` |"
+            echo "| 평촌 LB | \`${LB}\` |"
+            echo "| HTTP 응답 | ${CODE} |"
+            echo "| 백업 → 평촌 인식 | ${SYNC} 초 |"
+            echo "| **RTO (복원 시작 → HTTP 200)** | **$((RTO / 60)) 분 $((RTO % 60)) 초** |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          [ "${CODE}" = "200" ]
+
+      - name: "5) 훈련 리소스 정리"
+        if: always()
+        run: |
+          kubectl --kubeconfig "${KD}" delete namespace "${DRILL_NS}" --ignore-not-found --wait=false || true
+          velero --kubeconfig "${KD}" restore delete "${DRILL_ID}" --confirm || true
+          velero --kubeconfig "${KR}" backup delete "${DRILL_ID}" --confirm || true
+          rm -f "${KR}" "${KD}"
